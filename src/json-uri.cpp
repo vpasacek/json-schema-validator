@@ -104,6 +104,13 @@ void json_uri::update(const std::string &uri)
 				path_ = '/' + path;
 			else // otherwise it is a subfolder
 				path_.append(path);
+
+
+//			else { // otherwise it is a relative-path
+//				path_ = path_.substr(0, path_.find_last_of('/') + 1);
+//				path_.append(path);
+//			}
+
 		}
 	}
 

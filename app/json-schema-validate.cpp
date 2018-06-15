@@ -47,9 +47,10 @@ static void usage(const char *name)
 
 static void loader(const json_uri &uri, json &schema)
 {
-	std::fstream lf("." + uri.path());
+	std::string filename = "./" + uri.path();
+	std::fstream lf(filename);
 	if (!lf.good())
-		throw std::invalid_argument("could not open " + uri.url() + " tried with " + uri.path());
+		throw std::invalid_argument("could not open " + uri.url() + " tried with " + filename);
 
 	try {
 		lf >> schema;

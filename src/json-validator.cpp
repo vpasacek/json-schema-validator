@@ -26,6 +26,7 @@
 #include <json-schema.hpp>
 
 #include <set>
+#include <iostream>
 
 using nlohmann::json;
 using nlohmann::json_uri;
@@ -58,6 +59,8 @@ class resolver
 			if (std::find(base_uris.begin(), base_uris.end(), id) == base_uris.end())
 				base_uris.push_back(id);
 		}
+
+		std::cerr << "base_uris.back() " << base_uris.back() << "\n";
 
 		// store a raw pointer to this (sub-)schema referenced by all of its absolute json_uris
 		// this (sub-)schema is part of a schema stored inside schema_store_ so we can use the a raw-pointer-ref
@@ -108,7 +111,12 @@ class resolver
 				if (i.key() == "$ref") {
 					// use last inserted URI to derive the $ref-element
 					auto ref = base_uris.back().derive(i.value());
-					i.value() = ref.to_string();
+
+					std::cerr << "resolving : " << i.value() << " to " << ref << " from "
+						<< base_uris.back()
+						<< "\n";
+
+//					i.value() = ref.to_string();
 					refs.insert(ref);
 				}
 				break;
@@ -388,8 +396,10 @@ void json_validator::validate(const json &instance, const json &schema_, const s
 	// $ref resolution
 	do {
 		const auto &ref = schema->find("$ref");
-		if (ref == schema->end())
+		if (ref == schema->end()) {
+			std::cerr << instance << " " << *schema << "\n";
 			break;
+		}
 
 		auto it = schema_refs_.find(ref.value().get<std::string>());
 
@@ -455,6 +465,7 @@ void json_validator::validate(const json &instance, const json &schema_, const s
 				validate(instance, s, name);
 				count++;
 			} catch (std::exception &e) {
+				std::cerr << s << "\n";
 				sub_schema_err << "  one schema failed because: " << e.what() << "\n";
 
 				if (combine_logic == allOf)
