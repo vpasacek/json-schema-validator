@@ -1,5 +1,7 @@
 #include <nlohmann/json.hpp>
 
+#include <cstdlib>
+
 #include <regex>
 
 #include <iostream>
@@ -8,35 +10,118 @@ using nlohmann::json;
 
 #define REGEX_NAMESPACE std
 
-class validator
+namespace validator
+{
+
+class error_handler
+{
+	bool error_{false};
+
+public:
+	void error(const std::string &path, const json &instance, const std::string &message)
+	{
+		std::cerr << "ERROR: '" << path << "' - '" << instance << "': " << message << "\n";
+		error_ = true;
+	}
+
+	void reset() { error_ = false; }
+	operator bool() const { return error_; }
+};
+
+class type_based
 {
 public:
-	virtual void operator()(const json &value) const = 0;
+	virtual void validate(const json &instance, error_handler &e) const = 0;
+};
 
-	void error(const std::string &)
+class base
+{
+	std::vector<std::shared_ptr<type_based>> type_;
+
+	std::pair<bool, json> enum_;
+	std::pair<bool, json> const_;
+
+	std::shared_ptr<type_based> make(const json &schema, json::value_t type);
+
+public:
+	base(const json &schema)
+	    : type_((uint8_t) json::value_t::discarded + 1)
 	{
+		// association between JSON-schema-type and NLohmann-types
+		static const std::vector<std::pair<std::string, json::value_t>> schema_types = {
+		    {"null", json::value_t::null},
+		    {"object", json::value_t::object},
+		    {"array", json::value_t::array},
+		    {"string", json::value_t::string},
+		    {"boolean", json::value_t::boolean},
+		    {"integer", json::value_t::number_integer},
+		    {"integer", json::value_t::number_unsigned},
+		    {"number", json::value_t::number_float},
+		};
+		auto attr = schema.find("type");
+
+		if (attr == schema.end()) // no type field means all sub-types possible
+			for (auto &t : schema_types)
+				type_[(uint8_t) t.second] = make(schema, t.second);
+		else {
+			switch (attr.value().type()) { // "type": "type"
+
+			case json::value_t::string: {
+				auto schema_type = attr.value().get<std::string>();
+				for (auto &t : schema_types)
+					if (t.first == schema_type)
+						type_[(uint8_t) t.second] = make(schema, t.second);
+			} break;
+
+			case json::value_t::array: // "type": ["type1", "type2"]
+				for (const auto &schema_type : attr.value())
+					for (auto &t : schema_types)
+						if (t.first == schema_type)
+							type_[(uint8_t) t.second] = make(schema, t.second);
+				break;
+			default:
+				break;
+			}
+		}
+
+		attr = schema.find("enum");
+		if (attr != schema.end())
+			enum_ = {true, attr.value()};
+
+		attr = schema.find("const");
+		if (attr != schema.end())
+			const_ = {true, attr.value()};
+	}
+
+	void validate(const json &instance, error_handler &e) const
+	{
+		// depending on the type of instance run the type specific validator - if present
+		auto type = type_[(uint8_t) instance.type()];
+
+		if (type)
+			type->validate(instance, e);
+		else
+			e.error("", instance, "unexpected instance type");
+
+		if (enum_.first) {
+			bool seen_in_enum = false;
+			for (auto &e : enum_.second)
+				if (instance == e) {
+					seen_in_enum = true;
+					break;
+				}
+
+			if (!seen_in_enum)
+				e.error("", instance, "instance not found in required enum");
+		}
+
+		if (const_.first &&
+		    const_.second != instance)
+			e.error("", instance, "instance not as required by const");
 	}
 };
 
-class type_validator : public validator
-{
-	json::value_t type_;
-
-protected:
-	void operator()(const json &instance) const override
-	{
-		if (instance.type() != type_)
-			return;
-	}
-
-public:
-	type_validator(json::value_t t)
-	    : type_(t) {}
-};
-
-validator *createValidator(const json &schema);
-
-class string_validator : public type_validator
+class string : public type_based
 {
 	std::pair<bool, size_t> maxLength_{false, 0};
 	std::pair<bool, size_t> minLength_{false, 0};
@@ -58,15 +143,14 @@ class string_validator : public type_validator
 		return len;
 	}
 
-	void operator()(const json &instance) const override
+public:
+	void validate(const json &instance, error_handler &e) const override
 	{
-		type_validator::operator()(instance);
-
 		if (minLength_.first) {
 			if (utf8_length(instance) < minLength_.second) {
 				std::ostringstream s;
 				s << "'" << instance << "' is too short as per minLength (" << minLength_.second << ")";
-				throw std::out_of_range(s.str());
+				e.error("", instance, s.str());
 			}
 		}
 
@@ -74,28 +158,25 @@ class string_validator : public type_validator
 			if (utf8_length(instance) > maxLength_.second) {
 				std::ostringstream s;
 				s << "'" << instance << "' is too long as per maxLength (" << maxLength_.second << ")";
-				throw std::out_of_range(s.str());
+				e.error("", instance, s.str());
 			}
 		}
 
 #ifndef NO_STD_REGEX
 		if (pattern_.first &&
 		    !REGEX_NAMESPACE::regex_search(instance.get<std::string>(), pattern_.second))
-			throw std::invalid_argument(instance.get<std::string>() + " does not match regex pattern: " + patternString_);
+			e.error("", instance, instance.get<std::string>() + " does not match regex pattern: " + patternString_);
 #endif
 
 		if (format_.first) {
 			if (format_check_ == nullptr)
-				throw std::logic_error(std::string("A format checker was not provided but a format-attribute for this string is present. ") +
-				                       " cannot be validated for " + format_.second);
+				e.error("", instance, std::string("A format checker was not provided but a format-attribute for this string is present. ") + " cannot be validated for " + format_.second);
 			else
 				format_check_(format_.second, instance);
 		}
 	}
 
-public:
-	string_validator(const json &schema)
-	    : type_validator(json::value_t::string)
+	string(const json &schema)
 	{
 		auto v = schema.find("maxLength");
 		if (v != schema.end())
@@ -121,7 +202,7 @@ public:
 };
 
 template <typename T>
-class numeric_validator : public validator
+class numeric : public type_based
 {
 	std::pair<bool, T> maximum_{false, 0};
 	std::pair<bool, T> minimum_{false, 0};
@@ -140,27 +221,27 @@ class numeric_validator : public validator
 		return fabs(res) > std::numeric_limits<json::number_float_t>::epsilon();
 	}
 
-	void operator()(const json &instance) const override
+	void validate(const json &instance, error_handler &e) const override
 	{
 		T value = instance; // conversion of json to value_type
 
 		if (multipleOf_.first && value != 0) // zero is multiple of everything
 			if (violates_multiple_of(value))
-				throw std::out_of_range("is not a multiple of " + std::to_string(multipleOf_.second));
+				e.error("", instance, "is not a multiple of " + std::to_string(multipleOf_.second));
 
 		if (maximum_.first)
 			if ((exclusiveMaximum_ && value >= maximum_.second) ||
 			    value > maximum_.second)
-				throw std::out_of_range("exceeds maximum of " + std::to_string(maximum_.second));
+				e.error("", instance, "exceeds maximum of " + std::to_string(maximum_.second));
 
 		if (minimum_.first)
 			if ((exclusiveMinimum_ && value <= minimum_.second) ||
 			    value < minimum_.second)
-				throw std::out_of_range("is below minimum of " + std::to_string(minimum_.second));
+				e.error("", instance, "is below minimum of " + std::to_string(minimum_.second));
 	}
 
 public:
-	numeric_validator(const json &schema)
+	numeric(const json &schema)
 	{
 		auto v = schema.find("maximum");
 		if (v != schema.end())
@@ -184,25 +265,34 @@ public:
 	}
 };
 
-class null_validator : public type_validator
+class null : public type_based
 {
+	void validate(const json &instance, error_handler &e) const override
+	{
+		if (!instance.is_null())
+			e.error("", instance, "expected to be null");
+	}
+
 public:
-	null_validator()
-	    : type_validator(json::value_t::null) {}
+	null(const json &) {}
 };
 
-class boolean_validator : public type_validator
+class boolean : public type_based
 {
+	void validate(const json &, error_handler &) const override
+	{ } // nothing to be done here
+
 public:
-	boolean_validator()
-	    : type_validator(json::value_t::boolean) {}
+	boolean(const json &) {}
 };
 
-class required_validator : public validator
+#if 0
+
+class required
 {
 	std::vector<std::string> required_;
 
-	void operator()(const json &instance) const override
+	void operator()(const json &instance) const
 	{
 		for (auto &r : required_)
 			if (instance.find(r) == instance.end())
@@ -210,15 +300,15 @@ class required_validator : public validator
 	}
 
 public:
-	required_validator(const std::vector<std::string> &r)
+	required(const std::vector<std::string> &r)
 	    : required_(r) {}
 };
 
-class dependencies_validator : public validator
+class dependencies_validator
 {
 	std::map<std::string, validator *> dependencies_;
 
-	void operator()(const json &instance) const override
+	void operator()(const json &instance) const
 	{
 		for (auto &dep : dependencies_) {
 			auto prop = instance.find(dep.first);
@@ -237,7 +327,7 @@ public:
 				break;
 
 			case json::value_t::object:
-				dependencies_[dep.key()] = createValidator(dep.value());
+				// dependencies_[dep.key()] = createValidator(dep.value());
 				break;
 
 			default:
@@ -247,7 +337,8 @@ public:
 	}
 };
 
-class object_validator : public type_validator
+
+class object_validator
 {
 	std::pair<bool, size_t> maxProperties_{false, 0};
 	std::pair<bool, size_t> minProperties_{false, 0};
@@ -261,9 +352,10 @@ class object_validator : public type_validator
 
 	std::map<std::string, dependencies_validator> dependencies_;
 
+	validator *propertyNames_ = nullptr;
+
 public:
 	object_validator(const json &schema)
-	    : type_validator(json::value_t::string)
 	{
 		auto attr = schema.find("maxProperties");
 		if (attr != schema.end())
@@ -305,11 +397,14 @@ public:
 		if (attr != schema.end())
 			for (auto &dep : attr.value().items())
 				dependencies_.emplace(std::make_pair(dep.key(), dependencies_validator(dep.value())));
+
+		attr = schema.find("propertyNames");
+		if (attr != schema.end())
+			propertyNames_ = createValidator(attr.value());
 	}
 
 	void operator()(const json &instance) const override
 	{
-		type_validator::operator()(instance);
 
 		if (maxProperties_.first && instance.size() > maxProperties_.second)
 			throw std::out_of_range("too many properties.");
@@ -344,53 +439,67 @@ public:
 	}
 };
 
-class array_validator : public type_validator
+#endif
+
+class object : public type_based
+{
+	void validate(const json &, error_handler &) const override
+	{ } // nothing to be done here
+
+public:
+	object(const json &) {}
+};
+
+class array : public type_based
 {
 	std::pair<bool, size_t> maxItems_{false, 0};
 	std::pair<bool, size_t> minItems_{false, 0};
 	bool uniqueItems_ = false;
 
-	std::vector<validator *> items_;
-	validator *additionalItems_ = nullptr;
+	std::vector<std::shared_ptr<base>> items_;
+	std::shared_ptr<base> additionalItems_ = nullptr;
 
-	void operator()(const json &instance) const override
+	std::pair<bool, json> contains_;
+
+	void validate(const json &instance, error_handler &e) const override
 	{
-		type_validator::operator()(instance);
-
 		if (maxItems_.first && instance.size() > maxItems_.second)
-			throw std::out_of_range("has too many items.");
+			e.error("", instance, "has too many items.");
 
 		if (minItems_.first && instance.size() < minItems_.second)
-			throw std::out_of_range("has too few items.");
+			e.error("", instance, "has too few items.");
 
 		if (uniqueItems_) {
 			for (auto it = instance.cbegin(); it != instance.cend(); ++it) {
 				auto v = std::find(it + 1, instance.end(), *it);
 				if (v != instance.end())
-					throw std::out_of_range("items have to be unique for this array.");
+					e.error("", instance, "items have to be unique for this array.");
 			}
 		}
 
 		auto item = items_.cbegin();
 		for (auto &i : instance) {
-			validator *item_validator;
+			std::shared_ptr<base> item_validator;
 			if (item == items_.cend())
 				item_validator = additionalItems_;
 			else
 				item_validator = *item;
 
-			if (item_validator)
+			if (!item_validator)
 				break;
 
-			(*item_validator)(i);
+			item_validator->validate(i, e);
 
 			item++;
 		}
+
+		if (contains_.first &&
+			std::find(instance.begin(), instance.end(), contains_.second) == instance.end())
+			return;
 	}
 
 public:
-	array_validator(const json &schema)
-	    : type_validator(json::value_t::array)
+	array(const json &schema)
 	{
 		auto attr = schema.find("maxItems");
 		if (attr != schema.end())
@@ -407,30 +516,46 @@ public:
 		attr = schema.find("items");
 		if (attr != schema.end())
 			for (auto &subschema : attr.value())
-				items_.push_back(createValidator(subschema));
+				items_.push_back(std::make_shared<base>(subschema));
 
 		attr = schema.find("additionalItems");
 		if (attr != schema.end())
-			additionalItems_ = createValidator(attr.value());
+			additionalItems_ = std::make_shared<base>(attr.value());
 
-		// TODO contains
+		attr = schema.find("contains");
+		if (attr != schema.end())
+			contains_ = {true, attr.value()};
 	}
 };
 
-class always_false_validator : public validator
+
+std::shared_ptr<type_based> base::make(const json &schema, json::value_t type)
 {
-	void operator()(const json &) const override
-	{
-		// emit error
+	switch (type) {
+	case json::value_t::null:
+		return std::make_shared<null>(schema);
+	case json::value_t::number_unsigned:
+	case json::value_t::number_integer:
+		return std::make_shared<numeric<json::number_integer_t>>(schema);
+	case json::value_t::number_float:
+		return std::make_shared<numeric<json::number_float_t>>(schema);
+	case json::value_t::string:
+		return std::make_shared<string>(schema);
+	case json::value_t::boolean:
+		return std::make_shared<boolean>(schema);
+	case json::value_t::object:
+		return std::make_shared<object>(schema);
+	case json::value_t::array:
+		return std::make_shared<array>(schema);
+
+	case json::value_t::discarded: // not a real type - silence please
+		break;
 	}
-};
 
-class always_true_validator : public validator
-{
-	void operator()(const json &) const override {}
-};
+	return nullptr;
+}
 
-
+#if 0
 validator *createValidator(const json &schema)
 {
 	// first check whether the schema is true or false
@@ -461,9 +586,9 @@ validator *createValidator(const json &schema)
 		if (type == "string")
 			return new string_validator(schema);
 		else if (type == "null")
-			return new null_validator;
+			return new null_validator(schema);
 		else if (type == "boolean")
-			return new boolean_validator;
+			return new boolean_validator(schema);
 		else if (type == "object")
 			return new object_validator(schema);
 		else if (type == "array")
@@ -480,31 +605,104 @@ validator *createValidator(const json &schema)
 
 	return nullptr;
 }
+#endif
+
+} // namespace validator
 
 //template<ErrorHandlingPolicy, Default
 
+
+void suite()
+{
+	json validation; // a validation case following the JSON-test-suite-schema
+
+	try {
+		std::cin >> validation;
+	} catch (std::exception &e) {
+		std::cout << e.what() << "\n";
+		return;
+	}
+
+	size_t total_failed = 0,
+	       total = 0;
+
+	for (auto &test_group : validation) {
+		size_t group_failed = 0,
+		       group_total = 0;
+
+		std::cout << "Testing Group " << test_group["description"] << "\n";
+
+		const auto &schema = test_group["schema"];
+
+
+		validator::base validator(schema); // (loader, format_check);
+
+		for (auto &test_case : test_group["tests"]) {
+			std::cout << "  Testing Case " << test_case["description"] << "\n";
+
+			bool valid = true;
+
+			validator::error_handler err;
+			validator.validate(test_case["data"], err);
+
+			if (err)
+				valid = false;
+
+			if (valid == test_case["valid"])
+				std::cout << "      --> Test Case exited with " << valid << " as expected.\n";
+			else {
+				group_failed++;
+				std::cout << "      --> Test Case exited with " << valid << " NOT expected.\n";
+			}
+			group_total++;
+			std::cout << "\n";
+		}
+		total_failed += group_failed;
+		total += group_total;
+		std::cout << "Group RESULT: " << test_group["description"] << " "
+		          << (group_total - group_failed) << " of " << group_total
+		          << " have succeeded - " << group_failed << " failed\n";
+		std::cout << "-------------\n";
+	}
+
+	std::cout << "Total RESULT: " << (total - total_failed) << " of " << total << " have succeeded - " << total_failed << " failed\n";
+
+	return;
+}
+
+
+
 int main(void)
 {
-	const json schema_minimum = R"({"minimum": 1.1})"_json;
+	suite();
+	return EXIT_SUCCESS;
+
+
+	const json schema_minimum = R"({"minimum": 1.1, "type":"number"})"_json;
 
 	const json ok = 1.2;
 	const json ko = 1.0;
+	const json np = "string";
 
-	auto &validate = *createValidator(schema_minimum);
+	validator::base schema(schema_minimum);
 
 	std::cerr << "checking " << ok << "\n";
-	try {
-		validate(ok);
-	} catch (std::exception &e) {
-		std::cerr << "unexpected fail " << e.what() << "\n";
-	}
+	validator::error_handler err;
+	schema.validate(ok, err);
+	if (err)
+		std::cerr << "unexpected fail\n";
 
 	std::cerr << "checking " << ko << "\n";
-	try {
-		validate(ko);
-	} catch (std::exception &e) {
-		std::cerr << "expected fail " << e.what() << "\n";
-	}
+	err.reset();
+	schema.validate(ko, err);
+	if (err)
+		std::cerr << "expected fail\n";
+
+	std::cerr << "checking " << np << "\n";
+	err.reset();
+	schema.validate(np, err);
+	if (err)
+		std::cerr << "unexpected fail - no string problem\n";
 
 	return EXIT_SUCCESS;
 }

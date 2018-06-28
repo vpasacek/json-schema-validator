@@ -1,16 +1,18 @@
 #!/bin/bash
 
-PWD=$(realpath `dirname $0`/../JSON-Schema-Test-Suite/tests/draft4)
+set -x
 
-TESTS=`find $PWD | grep json$`
+PWD=$(realpath `dirname $0`/../../JSON-Schema-Test-Suite/tests/draft7)
+
+TESTS=$(find $PWD | grep json$ | egrep 'enum')
 
 FAILCOUNT=0
 
 for T in $TESTS
 do
-    ./json-schema-test < $T
+	echo $T
+    ./ng/ng < $T
     FAILCOUNT=$(($FAILCOUNT + $?))
 done
 
 echo $FAILCOUNT tests failed
-
