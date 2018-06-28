@@ -97,6 +97,8 @@ if (BUILD_EXAMPLES)
     target_link_libraries(json-schema-validate json-schema-validator)
 endif()
 
+add_subdirectory(ng)
+
 if (BUILD_TESTS)
     # test-zone
     enable_testing()
