@@ -417,8 +417,31 @@ public:
 	}
 };
 
+class always_false_validator : public validator
+{
+	void operator()(const json &) const override
+	{
+		// emit error
+	}
+};
+
+class always_true_validator : public validator
+{
+	void operator()(const json &) const override {}
+};
+
+
 validator *createValidator(const json &schema)
 {
+	// first check whether the schema is true or false
+	if (schema.type() == json::value_t::boolean) {
+		if (schema == true)
+			return new always_true_validator;
+		else
+			return new always_false_validator;
+	}
+
+	// assume schema is an object
 	json type;
 
 	const auto type_iter = schema.find("type");
