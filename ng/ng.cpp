@@ -47,6 +47,13 @@ public:
 	base(const json &schema)
 	    : type_((uint8_t) json::value_t::discarded + 1)
 	{
+		// boolean schema
+		if (schema.type() == json::value_t::boolean) {
+
+
+
+		}
+
 		// association between JSON-schema-type and NLohmann-types
 		static const std::vector<std::pair<std::string, json::value_t>> schema_types = {
 		    {"null", json::value_t::null},
@@ -83,6 +90,12 @@ public:
 				break;
 			}
 		}
+
+		// with nlohmann::json floats can be seen as unsigned or integer - reuse the number-validator
+		if (type_[(uint8_t) json::value_t::number_float] && !type_[(uint8_t) json::value_t::number_integer])
+			type_[(uint8_t) json::value_t::number_integer] =
+			    type_[(uint8_t) json::value_t::number_unsigned] =
+			        type_[(uint8_t) json::value_t::number_float];
 
 		attr = schema.find("enum");
 		if (attr != schema.end())
@@ -215,7 +228,6 @@ class numeric : public type_based
 	// multipleOf - if the rest of the division is 0 -> OK
 	bool violates_multiple_of(json::number_float_t x) const
 	{
-		std::cerr << x << "\n";
 		json::number_integer_t n = static_cast<json::number_integer_t>(x / multipleOf_.second);
 		double res = (x - n * multipleOf_.second);
 		return fabs(res) > std::numeric_limits<json::number_float_t>::epsilon();
@@ -287,12 +299,11 @@ public:
 };
 
 #if 0
-
-class required
+class required : public type_based
 {
 	std::vector<std::string> required_;
 
-	void operator()(const json &instance) const
+	void validate(const json &instance, error_handler &e) const override
 	{
 		for (auto &r : required_)
 			if (instance.find(r) == instance.end())
@@ -306,14 +317,14 @@ public:
 
 class dependencies_validator
 {
-	std::map<std::string, validator *> dependencies_;
+	std::map<std::string, std::shared_ptr<base>> dependencies_;
 
-	void operator()(const json &instance) const
+	void validate(const json &instance, error_handler &e) const
 	{
 		for (auto &dep : dependencies_) {
 			auto prop = instance.find(dep.first);
 			if (prop != instance.end()) // if dependency-property is present in instance
-				(*dep.second)(instance);  // validate
+				dep.second->validate(instance, e);  // validate
 		}
 	}
 
@@ -336,26 +347,59 @@ public:
 		}
 	}
 };
+#endif
 
-
-class object_validator
+class object : public type_based
 {
 	std::pair<bool, size_t> maxProperties_{false, 0};
 	std::pair<bool, size_t> minProperties_{false, 0};
 	std::vector<std::string> required_;
 
-	std::map<std::string, validator *> properties_;
+	std::map<std::string, std::shared_ptr<base>> properties_;
 #ifndef NO_STD_REGEX
-	std::vector<std::pair<REGEX_NAMESPACE::regex, validator *>> patternProperties_;
+	std::vector<std::pair<REGEX_NAMESPACE::regex, std::shared_ptr<base>>> patternProperties_;
 #endif
-	validator *additionalProperties_;
+	std::shared_ptr<base> additionalProperties_;
 
-	std::map<std::string, dependencies_validator> dependencies_;
+//	std::map<std::string, dependencies_validator> dependencies_;
 
-	validator *propertyNames_ = nullptr;
+	std::shared_ptr<base> propertyNames_ = nullptr;
 
+	void validate(const json &instance, error_handler &e) const override
+	{
+		if (maxProperties_.first && instance.size() > maxProperties_.second)
+			e.error("", instance, "too many properties.");
+
+		if (minProperties_.first && instance.size() < minProperties_.second)
+			e.error("", instance, "too few properties.");
+
+		for (auto &r : required_)
+			if (instance.find(r) == instance.end())
+				e.error("", instance, "required property '" + r + "' not found in object '");
+
+		// for each property in instance
+		for (auto &p : instance.items()) {
+
+			auto schema_p = properties_.find(p.key());
+			// check if it is in "properties"
+			if (schema_p != properties_.end())
+				schema_p->second->validate(p.value(), e);
+			else {
+				bool a_pattern_matched = false;
+				// check all matching patternProperties
+				for (auto &schema_pp : patternProperties_)
+					if (REGEX_NAMESPACE::regex_search(p.key(), schema_pp.first)) {
+						a_pattern_matched = true;
+						schema_pp.second->validate(p.value(), e);
+					}
+				// check additionalProperties as a last resort
+				if (!a_pattern_matched && additionalProperties_)
+					additionalProperties_->validate(p.value(), e);
+			}
+		}
+	}
 public:
-	object_validator(const json &schema)
+	object(const json &schema)
 	{
 		auto attr = schema.find("maxProperties");
 		if (attr != schema.end())
@@ -375,7 +419,7 @@ public:
 				properties_.insert(
 				    std::make_pair(
 				        prop.key(),
-				        createValidator(prop.value())));
+				        std::make_shared<base>(prop.value())));
 		}
 
 #ifndef NO_STD_REGEX
@@ -385,69 +429,24 @@ public:
 				patternProperties_.push_back(
 				    std::make_pair(
 				        REGEX_NAMESPACE::regex(prop.key(), REGEX_NAMESPACE::regex::ECMAScript),
-				        createValidator(prop.value())));
+				        std::make_shared<base>(prop.value())));
 		}
 #endif
 
 		attr = schema.find("additionalProperties");
 		if (attr != schema.end())
-			additionalProperties_ = createValidator(attr.value());
+			additionalProperties_ = std::make_shared<base>(attr.value());
 
-		attr = schema.find("dependencies");
-		if (attr != schema.end())
-			for (auto &dep : attr.value().items())
-				dependencies_.emplace(std::make_pair(dep.key(), dependencies_validator(dep.value())));
+		//attr = schema.find("dependencies");
+		//if (attr != schema.end())
+		//	for (auto &dep : attr.value().items())
+		//		dependencies_.emplace(std::make_pair(dep.key(), dependencies_validator(dep.value())));
 
 		attr = schema.find("propertyNames");
 		if (attr != schema.end())
-			propertyNames_ = createValidator(attr.value());
+			propertyNames_ = std::make_shared<base>(attr.value());
 	}
 
-	void operator()(const json &instance) const override
-	{
-
-		if (maxProperties_.first && instance.size() > maxProperties_.second)
-			throw std::out_of_range("too many properties.");
-
-		if (minProperties_.first && instance.size() < minProperties_.second)
-			throw std::out_of_range("too few properties.");
-
-		for (auto &r : required_)
-			if (instance.find(r) == instance.end())
-				throw std::invalid_argument("required property '" + r + "' not found in object '");
-
-		// for each property
-		for (auto &p : instance.items()) {
-
-			auto schema_p = properties_.find(p.key());
-			// check if it is in "properties"
-			if (schema_p != properties_.end())
-				(*schema_p->second)(p.value());
-			else {
-				bool a_pattern_matched = false;
-				// check all matching patternProperties
-				for (auto &schema_pp : patternProperties_)
-					if (REGEX_NAMESPACE::regex_search(p.key(), schema_pp.first)) {
-						a_pattern_matched = true;
-						(*schema_pp.second)(p.value());
-					}
-				// check additionalProperties as a last resort
-				if (!a_pattern_matched && additionalProperties_)
-					(*additionalProperties_)(p.value());
-			}
-		}
-	}
-};
-
-#endif
-
-class object : public type_based
-{
-	void validate(const json &, error_handler &) const override
-	{ } // nothing to be done here
-
-public:
-	object(const json &) {}
 };
 
 class array : public type_based
@@ -495,7 +494,7 @@ class array : public type_based
 
 		if (contains_.first &&
 			std::find(instance.begin(), instance.end(), contains_.second) == instance.end())
-			return;
+			e.error("", instance, "array does not contain required element as per 'contains'");
 	}
 
 public:
@@ -535,6 +534,7 @@ std::shared_ptr<type_based> base::make(const json &schema, json::value_t type)
 	case json::value_t::null:
 		return std::make_shared<null>(schema);
 	case json::value_t::number_unsigned:
+		return std::make_shared<numeric<json::number_unsigned_t>>(schema);
 	case json::value_t::number_integer:
 		return std::make_shared<numeric<json::number_integer_t>>(schema);
 	case json::value_t::number_float:
