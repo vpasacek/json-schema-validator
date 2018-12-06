@@ -49,9 +49,7 @@ public:
 	{
 		// boolean schema
 		if (schema.type() == json::value_t::boolean) {
-
-
-
+			std::cerr << "TODO boolean schema\n";
 		}
 
 		// association between JSON-schema-type and NLohmann-types
@@ -264,12 +262,16 @@ public:
 			minimum_ = {true, v.value()};
 
 		v = schema.find("exclusiveMaximum");
-		if (v != schema.end())
-			exclusiveMaximum_ = v.value();
+		if (v != schema.end()) {
+			exclusiveMaximum_ = true;
+			maximum_ = {true, v.value()};
+		}
 
 		v = schema.find("exclusiveMinimum");
-		if (v != schema.end())
-			exclusiveMinimum_ = v.value();
+		if (v != schema.end()) {
+			minimum_ = {true, v.value()};
+			exclusiveMinimum_ = true;
+		}
 
 		v = schema.find("multipleOf");
 		if (v != schema.end())
@@ -481,15 +483,15 @@ class array : public type_based
 			std::shared_ptr<base> item_validator;
 			if (item == items_.cend())
 				item_validator = additionalItems_;
-			else
+			else {
 				item_validator = *item;
+				item++;
+			}
 
 			if (!item_validator)
 				break;
 
 			item_validator->validate(i, e);
-
-			item++;
 		}
 
 		if (contains_.first &&
