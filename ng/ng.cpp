@@ -379,23 +379,23 @@ class object : public type_based
 
 		// for each property in instance
 		for (auto &p : instance.items()) {
-
+			bool a_prop_or_pattern_matched = false;
 			auto schema_p = properties_.find(p.key());
 			// check if it is in "properties"
-			if (schema_p != properties_.end())
+			if (schema_p != properties_.end()) {
+				a_prop_or_pattern_matched = true;
 				schema_p->second->validate(p.value(), e);
-			else {
-				bool a_pattern_matched = false;
-				// check all matching patternProperties
-				for (auto &schema_pp : patternProperties_)
-					if (REGEX_NAMESPACE::regex_search(p.key(), schema_pp.first)) {
-						a_pattern_matched = true;
-						schema_pp.second->validate(p.value(), e);
-					}
-				// check additionalProperties as a last resort
-				if (!a_pattern_matched && additionalProperties_)
-					additionalProperties_->validate(p.value(), e);
 			}
+
+			// check all matching patternProperties
+			for (auto &schema_pp : patternProperties_)
+				if (REGEX_NAMESPACE::regex_search(p.key(), schema_pp.first)) {
+					a_prop_or_pattern_matched = true;
+					schema_pp.second->validate(p.value(), e);
+				}
+			// check additionalProperties as a last resort
+			if (!a_prop_or_pattern_matched && additionalProperties_)
+				additionalProperties_->validate(p.value(), e);
 		}
 	}
 public:
