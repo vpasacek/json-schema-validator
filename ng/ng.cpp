@@ -365,7 +365,7 @@ class object : public type_based
 
 //	std::map<std::string, dependencies_validator> dependencies_;
 
-	std::shared_ptr<base> propertyNames_ = nullptr;
+	std::shared_ptr<base> propertyNames_;
 
 	void validate(const json &instance, error_handler &e) const override
 	{
@@ -381,6 +381,9 @@ class object : public type_based
 
 		// for each property in instance
 		for (auto &p : instance.items()) {
+			if (propertyNames_)
+				propertyNames_->validate(p.key(), e);
+
 			bool a_prop_or_pattern_matched = false;
 			auto schema_p = properties_.find(p.key());
 			// check if it is in "properties"
