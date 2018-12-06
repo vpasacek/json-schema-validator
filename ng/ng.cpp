@@ -458,9 +458,9 @@ class array : public type_based
 	bool uniqueItems_ = false;
 
 	std::vector<std::shared_ptr<base>> items_;
-	std::shared_ptr<base> additionalItems_ = nullptr;
+	std::shared_ptr<base> additionalItems_;
 
-	std::pair<bool, json> contains_;
+	std::shared_ptr<base> contains_;
 
 	void validate(const json &instance, error_handler &e) const override
 	{
@@ -494,9 +494,19 @@ class array : public type_based
 			item_validator->validate(i, e);
 		}
 
-		if (contains_.first &&
-			std::find(instance.begin(), instance.end(), contains_.second) == instance.end())
-			e.error("", instance, "array does not contain required element as per 'contains'");
+		if (contains_) {
+			bool contained = false;
+			for (auto &item : instance) {
+				error_handler local_e;
+				contains_->validate(item, local_e);
+				if (!local_e) {
+					contained = true;
+					break;
+				}
+			}
+			if (!contained)
+				e.error("", instance, "array does not contain required element as per 'contains'");
+		}
 	}
 
 public:
@@ -525,7 +535,7 @@ public:
 
 		attr = schema.find("contains");
 		if (attr != schema.end())
-			contains_ = {true, attr.value()};
+			contains_ = std::make_shared<base>(attr.value());
 	}
 };
 
