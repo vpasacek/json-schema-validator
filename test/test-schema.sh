@@ -33,14 +33,17 @@ boolean_schema.json
 
 not.json
 anyOf.json
-refRemote.json
-if-then-else.json
-dependencies.json
 allOf.json
 oneOf.json
+dependencies.json
+if-then-else.json
 default.json
-ref.json
+
 definitions.json
+
+refRemote.json
+ref.json
+
 optional/ecmascript-regex.json
 optional/zeroTerminatedFloats.json
 optional/format/uri-reference.json

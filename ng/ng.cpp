@@ -405,56 +405,21 @@ public:
 	    : true_(schema) {}
 };
 
-#if 0
-class required : public type_schema
+class required : public schema
 {
-	std::vector<std::string> required_;
+	const std::vector<std::string> required_;
 
-	void validate(const json &instance, error_handler &e) const override
+	void validate(const json &instance, error_handler &e) const override final
 	{
 		for (auto &r : required_)
 			if (instance.find(r) == instance.end())
-				throw std::invalid_argument("required property '" + r + "' not found in object '");
+				e.error("", instance, "required property '" + r + "' not found in object as a dependency");
 	}
 
 public:
 	required(const std::vector<std::string> &r)
 	    : required_(r) {}
 };
-
-class dependencies_validator
-{
-	std::map<std::string, std::shared_ptr<base>> dependencies_;
-
-	void validate(const json &instance, error_handler &e) const
-	{
-		for (auto &dep : dependencies_) {
-			auto prop = instance.find(dep.first);
-			if (prop != instance.end()) // if dependency-property is present in instance
-				dep.second->validate(instance, e);  // validate
-		}
-	}
-
-public:
-	dependencies_validator(const json &object)
-	{
-		for (auto &dep : object.items()) {
-			switch (dep.value().type()) {
-			case json::value_t::array:
-				dependencies_[dep.key()] = new required_validator(dep.value().get<std::vector<std::string>>());
-				break;
-
-			case json::value_t::object:
-				// dependencies_[dep.key()] = createValidator(dep.value());
-				break;
-
-			default:
-				break;
-			}
-		}
-	}
-};
-#endif
 
 class object : public schema
 {
@@ -468,7 +433,7 @@ class object : public schema
 #endif
 	std::shared_ptr<schema> additionalProperties_;
 
-	//	std::map<std::string, dependencies_validator> dependencies_;
+	std::map<std::string, std::shared_ptr<schema>> dependencies_;
 
 	std::shared_ptr<schema> propertyNames_;
 
@@ -506,6 +471,12 @@ class object : public schema
 			// check additionalProperties as a last resort
 			if (!a_prop_or_pattern_matched && additionalProperties_)
 				additionalProperties_->validate(p.value(), e);
+		}
+
+		for (auto &dep : dependencies_) {
+			auto prop = instance.find(dep.first);
+			if (prop != instance.end())          // if dependency-property is present in instance
+				dep.second->validate(instance, e); // validate
 		}
 	}
 
@@ -548,10 +519,20 @@ public:
 		if (attr != schema.end())
 			additionalProperties_ = schema::make(attr.value());
 
-		//attr = schema.find("dependencies");
-		//if (attr != schema.end())
-		//	for (auto &dep : attr.value().items())
-		//		dependencies_.emplace(std::make_pair(dep.key(), dependencies_validator(dep.value())));
+		attr = schema.find("dependencies");
+		if (attr != schema.end())
+			for (auto &dep : attr.value().items())
+				switch (dep.value().type()) {
+				case json::value_t::array:
+					dependencies_.emplace(dep.key(),
+					                      std::make_shared<required>(dep.value().get<std::vector<std::string>>()));
+					break;
+
+				default:
+					dependencies_.emplace(dep.key(),
+					                      schema::make(dep.value()));
+					break;
+				}
 
 		attr = schema.find("propertyNames");
 		if (attr != schema.end())
