@@ -109,6 +109,8 @@ class type_schema : public schema
 
 	static std::shared_ptr<schema> make(const json &schema, json::value_t type);
 
+	std::shared_ptr<schema> if_, then_, else_;
+
 public:
 	type_schema(const json &schema)
 	    : type_((uint8_t) json::value_t::discarded + 1)
@@ -180,6 +182,22 @@ public:
 		attr = schema.find("oneOf");
 		if (attr != schema.end())
 			logic_.push_back(std::make_shared<logical_combination<oneOf>>(attr.value()));
+
+		attr = schema.find("if");
+		if (attr != schema.end()) {
+			if_ = schema::make(attr.value());
+
+			attr = schema.find("then");
+			if (attr != schema.end())
+				then_ = schema::make(attr.value());
+
+			attr = schema.find("else");
+			if (attr != schema.end())
+				else_ = schema::make(attr.value());
+
+			if (!then_ && !else_)
+				if_ = nullptr;
+		}
 	}
 
 	void validate(const json &instance, error_handler &e) const override final
@@ -210,6 +228,19 @@ public:
 
 		for (auto l : logic_)
 			l->validate(instance, e);
+
+		if (if_) {
+			error_handler err;
+
+			if_->validate(instance, err);
+			if (!err) {
+				if (then_)
+					then_->validate(instance, e);
+			} else {
+				if (else_)
+					else_->validate(instance, e);
+			}
+		}
 	}
 };
 
@@ -374,9 +405,7 @@ public:
 
 class boolean_type : public schema
 {
-	void validate(const json &, error_handler &) const override
-	{
-	}
+	void validate(const json &, error_handler &) const override {}
 
 public:
 	boolean_type(const json &) {}

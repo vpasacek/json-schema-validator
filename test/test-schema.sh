@@ -64,7 +64,8 @@ optional/format/regex.json
 optional/format/time.json
 optional/format/idn-hostname.json
 optional/bignum.json
-optional/content.json"
+optional/content.json
+"
 
 
 FAILCOUNT=0
