@@ -36,12 +36,76 @@ public:
 	static std::shared_ptr<schema> make(const json &schema);
 };
 
+class logical_not : public schema
+{
+	std::shared_ptr<schema> subschema_;
+
+	void validate(const json &instance, error_handler &e) const final
+	{
+		error_handler err;
+		subschema_->validate(instance, err);
+
+		if (!err)
+			e.error("", instance, "instance is valid, whereas it should NOT be as required by schema");
+	}
+
+public:
+	logical_not(const json &schema) { subschema_ = schema::make(schema); }
+};
+
+enum logical_combination_types {
+	allOf,
+	anyOf,
+	oneOf
+};
+
+template <enum logical_combination_types combine_logic>
+class logical_combination : public schema
+{
+	std::vector<std::shared_ptr<schema>> subschemata_;
+
+	void validate(const json &instance, error_handler &e) const final
+	{
+		size_t count = 0;
+
+		for (const auto &s : subschemata_) {
+			error_handler err;
+			s->validate(instance, err);
+
+			if (err) {
+				//sub_schema_err << "  one schema failed because: " << e.what() << "\n";
+				if (combine_logic == allOf) {
+					e.error("", instance, "at least one schema has failed, but ALLOF them are required to validate.");
+					return;
+				}
+			} else
+				count++;
+
+			if (combine_logic == oneOf && count > 1) {
+				e.error("", instance, "more than one schema has succeeded, but only ONEOF them is required to validate.");
+				return;
+			}
+		}
+
+		if ((combine_logic == anyOf || combine_logic == oneOf) && count == 0)
+			e.error("", instance, "no validation has succeeded but ANYOF/ONEOF them is required to validate.");
+	}
+
+public:
+	logical_combination(const json &schema)
+	{
+		for (auto &subschema : schema) {
+			std::cerr << subschema << "\n";
+			subschemata_.push_back(schema::make(subschema));
+		}
+	}
+};
+
 class type_schema : public schema
 {
 	std::vector<std::shared_ptr<schema>> type_;
-
-	std::pair<bool, json> enum_;
-	std::pair<bool, json> const_;
+	std::pair<bool, json> enum_, const_;
+	std::vector<std::shared_ptr<schema>> logic_;
 
 	static std::shared_ptr<schema> make(const json &schema, json::value_t type);
 
@@ -100,6 +164,22 @@ public:
 		attr = schema.find("const");
 		if (attr != schema.end())
 			const_ = {true, attr.value()};
+
+		attr = schema.find("not");
+		if (attr != schema.end())
+			logic_.push_back(std::make_shared<logical_not>(attr.value()));
+
+		attr = schema.find("allOf");
+		if (attr != schema.end())
+			logic_.push_back(std::make_shared<logical_combination<allOf>>(attr.value()));
+
+		attr = schema.find("anyOf");
+		if (attr != schema.end())
+			logic_.push_back(std::make_shared<logical_combination<anyOf>>(attr.value()));
+
+		attr = schema.find("oneOf");
+		if (attr != schema.end())
+			logic_.push_back(std::make_shared<logical_combination<oneOf>>(attr.value()));
 	}
 
 	void validate(const json &instance, error_handler &e) const override final
@@ -126,7 +206,10 @@ public:
 
 		if (const_.first &&
 		    const_.second != instance)
-			e.error("", instance, "instance not as required by const");
+			e.error("", instance, "instance not const");
+
+		for (auto l : logic_)
+			l->validate(instance, e);
 	}
 };
 
@@ -292,12 +375,12 @@ public:
 class boolean_type : public schema
 {
 	void validate(const json &, error_handler &) const override
-	{ }
+	{
+	}
 
 public:
-	boolean_type(const json &) { }
+	boolean_type(const json &) {}
 };
-
 
 class boolean : public schema
 {
@@ -321,8 +404,6 @@ public:
 	boolean(const json &schema)
 	    : true_(schema) {}
 };
-
-
 
 #if 0
 class required : public type_schema
@@ -387,7 +468,7 @@ class object : public schema
 #endif
 	std::shared_ptr<schema> additionalProperties_;
 
-//	std::map<std::string, dependencies_validator> dependencies_;
+	//	std::map<std::string, dependencies_validator> dependencies_;
 
 	std::shared_ptr<schema> propertyNames_;
 
@@ -427,6 +508,7 @@ class object : public schema
 				additionalProperties_->validate(p.value(), e);
 		}
 	}
+
 public:
 	object(const json &schema)
 	{
@@ -448,7 +530,7 @@ public:
 				properties_.insert(
 				    std::make_pair(
 				        prop.key(),
-						schema::make(prop.value())));
+				        schema::make(prop.value())));
 		}
 
 #ifndef NO_STD_REGEX
@@ -475,7 +557,6 @@ public:
 		if (attr != schema.end())
 			propertyNames_ = schema::make(attr.value());
 	}
-
 };
 
 class array : public schema
@@ -569,7 +650,7 @@ public:
 					additionalItems_ = schema::make(attr.value());
 
 			} else if (attr.value().type() == json::value_t::object ||
-					   attr.value().type() == json::value_t::boolean)
+			           attr.value().type() == json::value_t::boolean)
 				items_schema_ = schema::make(attr.value());
 		}
 
@@ -608,12 +689,10 @@ std::shared_ptr<schema> type_schema::make(const json &schema, json::value_t type
 std::shared_ptr<schema> schema::make(const json &schema)
 {
 	// boolean schema
-	if (schema.type() == json::value_t::boolean) {
+	if (schema.type() == json::value_t::boolean)
 		return std::make_shared<boolean>(schema);
-	} else { // TODO logical and conditional schema
-
+	else
 		return std::make_shared<type_schema>(schema);
-	}
 }
 
 class root_schema : schema
