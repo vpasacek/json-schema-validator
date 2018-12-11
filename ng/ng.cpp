@@ -10,6 +10,38 @@ using nlohmann::json;
 
 #define REGEX_NAMESPACE std
 
+namespace nlohmann
+{
+namespace json_schema
+{
+extern json draft7_schema_builtin;
+}
+} // namespace nlohmann
+
+static void loader(const std::string &uri, json &schema)
+{
+	if (uri == "http://json-schema.org/draft-04/schema#") {
+		schema = nlohmann::json_schema::draft7_schema_builtin;
+		return;
+	}
+#if 0
+	std::string fn = JSON_SCHEMA_TEST_SUITE_PATH;
+	fn += "/remotes";
+	fn += uri.path();
+	std::cerr << fn << "\n";
+
+	std::fstream s(fn.c_str());
+	if (!s.good())
+		throw std::invalid_argument("could not open " + uri.url() + " for schema loading\n");
+
+	try {
+		s >> schema;
+	} catch (std::exception &e) {
+		throw e;
+	}
+#endif
+}
+
 namespace validator
 {
 
@@ -28,13 +60,22 @@ public:
 	operator bool() const { return error_; }
 };
 
+class root_schema;
+
 class schema
 {
+protected:
+	root_schema *root_;
+
 public:
+	schema(root_schema *root)
+	    : root_(root) {}
+
 	virtual void validate(const json &instance, error_handler &e) const = 0;
 
-	static std::shared_ptr<schema> make(const json &schema);
+	static std::shared_ptr<schema> make(const json &schema, root_schema *root);
 };
+
 
 class logical_not : public schema
 {
@@ -50,7 +91,11 @@ class logical_not : public schema
 	}
 
 public:
-	logical_not(const json &schema) { subschema_ = schema::make(schema); }
+	logical_not(const json &sch, root_schema *root)
+	    : schema(root)
+	{
+		subschema_ = schema::make(sch, root);
+	}
 };
 
 enum logical_combination_types {
@@ -68,7 +113,7 @@ class logical_combination : public schema
 	{
 		size_t count = 0;
 
-		for (const auto &s : subschemata_) {
+		for (auto &s : subschemata_) {
 			error_handler err;
 			s->validate(instance, err);
 
@@ -92,12 +137,10 @@ class logical_combination : public schema
 	}
 
 public:
-	logical_combination(const json &schema)
+	logical_combination(const json &sch, root_schema *root) : schema(root)
 	{
-		for (auto &subschema : schema) {
-			std::cerr << subschema << "\n";
-			subschemata_.push_back(schema::make(subschema));
-		}
+		for (auto &subschema : sch)
+			subschemata_.push_back(schema::make(subschema, root));
 	}
 };
 
@@ -107,13 +150,13 @@ class type_schema : public schema
 	std::pair<bool, json> enum_, const_;
 	std::vector<std::shared_ptr<schema>> logic_;
 
-	static std::shared_ptr<schema> make(const json &schema, json::value_t type);
+	static std::shared_ptr<schema> make(const json &schema, json::value_t type, root_schema *);
 
 	std::shared_ptr<schema> if_, then_, else_;
 
 public:
-	type_schema(const json &schema)
-	    : type_((uint8_t) json::value_t::discarded + 1)
+	type_schema(const json &sch, root_schema *root) :
+	    schema(root), type_((uint8_t) json::value_t::discarded + 1)
 	{
 		// association between JSON-schema-type and NLohmann-types
 		static const std::vector<std::pair<std::string, json::value_t>> schema_types = {
@@ -126,11 +169,11 @@ public:
 		    {"integer", json::value_t::number_unsigned},
 		    {"number", json::value_t::number_float},
 		};
-		auto attr = schema.find("type");
+		auto attr = sch.find("type");
 
-		if (attr == schema.end()) // no type field means all sub-types possible
+		if (attr == sch.end()) // no type field means all sub-types possible
 			for (auto &t : schema_types)
-				type_[(uint8_t) t.second] = type_schema::make(schema, t.second);
+				type_[(uint8_t) t.second] = type_schema::make(sch, t.second, root);
 		else {
 			switch (attr.value().type()) { // "type": "type"
 
@@ -138,14 +181,14 @@ public:
 				auto schema_type = attr.value().get<std::string>();
 				for (auto &t : schema_types)
 					if (t.first == schema_type)
-						type_[(uint8_t) t.second] = type_schema::make(schema, t.second);
+						type_[(uint8_t) t.second] = type_schema::make(sch, t.second, root);
 			} break;
 
 			case json::value_t::array: // "type": ["type1", "type2"]
-				for (const auto &schema_type : attr.value())
+				for (auto &schema_type : attr.value())
 					for (auto &t : schema_types)
 						if (t.first == schema_type)
-							type_[(uint8_t) t.second] = type_schema::make(schema, t.second);
+							type_[(uint8_t) t.second] = type_schema::make(sch, t.second, root);
 				break;
 			default:
 				break;
@@ -159,44 +202,52 @@ public:
 			    type_[(uint8_t) json::value_t::number_unsigned] =
 			        type_[(uint8_t) json::value_t::number_float];
 
-		attr = schema.find("enum");
-		if (attr != schema.end())
+		attr = sch.find("enum");
+		if (attr != sch.end())
 			enum_ = {true, attr.value()};
 
-		attr = schema.find("const");
-		if (attr != schema.end())
+		attr = sch.find("const");
+		if (attr != sch.end())
 			const_ = {true, attr.value()};
 
-		attr = schema.find("not");
-		if (attr != schema.end())
-			logic_.push_back(std::make_shared<logical_not>(attr.value()));
+		attr = sch.find("not");
+		if (attr != sch.end())
+			logic_.push_back(std::make_shared<logical_not>(attr.value(), root));
 
-		attr = schema.find("allOf");
-		if (attr != schema.end())
-			logic_.push_back(std::make_shared<logical_combination<allOf>>(attr.value()));
+		attr = sch.find("allOf");
+		if (attr != sch.end())
+			logic_.push_back(std::make_shared<logical_combination<allOf>>(attr.value(), root));
 
-		attr = schema.find("anyOf");
-		if (attr != schema.end())
-			logic_.push_back(std::make_shared<logical_combination<anyOf>>(attr.value()));
+		attr = sch.find("anyOf");
+		if (attr != sch.end())
+			logic_.push_back(std::make_shared<logical_combination<anyOf>>(attr.value(), root));
 
-		attr = schema.find("oneOf");
-		if (attr != schema.end())
-			logic_.push_back(std::make_shared<logical_combination<oneOf>>(attr.value()));
+		attr = sch.find("oneOf");
+		if (attr != sch.end())
+			logic_.push_back(std::make_shared<logical_combination<oneOf>>(attr.value(), root));
 
-		attr = schema.find("if");
-		if (attr != schema.end()) {
-			if_ = schema::make(attr.value());
+		attr = sch.find("if");
+		if (attr != sch.end()) {
+			if_ = schema::make(attr.value(), root);
 
-			attr = schema.find("then");
-			if (attr != schema.end())
-				then_ = schema::make(attr.value());
+			attr = sch.find("then");
+			if (attr != sch.end())
+				then_ = schema::make(attr.value(), root);
 
-			attr = schema.find("else");
-			if (attr != schema.end())
-				else_ = schema::make(attr.value());
+			attr = sch.find("else");
+			if (attr != sch.end())
+				else_ = schema::make(attr.value(), root);
 
 			if (!then_ && !else_)
 				if_ = nullptr;
+		}
+
+		attr = sch.find("definition");
+		if (attr != sch.end()) {
+			for (auto &def : attr.value().items()) {
+				std::cerr << "making def: " << attr.value() << "\n";
+				schema::make(def.value(), root);
+			}
 		}
 	}
 
@@ -299,27 +350,27 @@ public:
 		}
 	}
 
-	string(const json &schema)
+	string(const json &sch, root_schema *root) : schema(root)
 	{
-		auto v = schema.find("maxLength");
-		if (v != schema.end())
+		auto v = sch.find("maxLength");
+		if (v != sch.end())
 			maxLength_ = {true, v.value()};
 
-		v = schema.find("minLength");
-		if (v != schema.end())
+		v = sch.find("minLength");
+		if (v != sch.end())
 			minLength_ = {true, v.value()};
 
 #ifndef NO_STD_REGEX
-		v = schema.find("pattern");
-		if (v != schema.end()) {
+		v = sch.find("pattern");
+		if (v != sch.end()) {
 			patternString_ = v.value();
 			pattern_ = {true, REGEX_NAMESPACE::regex(v.value().get<std::string>(),
 			                                         REGEX_NAMESPACE::regex::ECMAScript)};
 		}
 #endif
 
-		v = schema.find("format");
-		if (v != schema.end())
+		v = sch.find("format");
+		if (v != sch.end())
 			format_ = {true, v.value()};
 	}
 };
@@ -363,30 +414,30 @@ class numeric : public schema
 	}
 
 public:
-	numeric(const json &schema)
+	numeric(const json &sch, root_schema *root) : schema(root)
 	{
-		auto v = schema.find("maximum");
-		if (v != schema.end())
+		auto v = sch.find("maximum");
+		if (v != sch.end())
 			maximum_ = {true, v.value()};
 
-		v = schema.find("minimum");
-		if (v != schema.end())
+		v = sch.find("minimum");
+		if (v != sch.end())
 			minimum_ = {true, v.value()};
 
-		v = schema.find("exclusiveMaximum");
-		if (v != schema.end()) {
+		v = sch.find("exclusiveMaximum");
+		if (v != sch.end()) {
 			exclusiveMaximum_ = true;
 			maximum_ = {true, v.value()};
 		}
 
-		v = schema.find("exclusiveMinimum");
-		if (v != schema.end()) {
+		v = sch.find("exclusiveMinimum");
+		if (v != sch.end()) {
 			minimum_ = {true, v.value()};
 			exclusiveMinimum_ = true;
 		}
 
-		v = schema.find("multipleOf");
-		if (v != schema.end())
+		v = sch.find("multipleOf");
+		if (v != sch.end())
 			multipleOf_ = {true, v.value()};
 	}
 };
@@ -400,7 +451,7 @@ class null : public schema
 	}
 
 public:
-	null(const json &) {}
+	null(const json &, root_schema *root) : schema(root) {}
 };
 
 class boolean_type : public schema
@@ -408,7 +459,7 @@ class boolean_type : public schema
 	void validate(const json &, error_handler &) const override {}
 
 public:
-	boolean_type(const json &) {}
+	boolean_type(const json &, root_schema *root) : schema(root) {}
 };
 
 class boolean : public schema
@@ -430,8 +481,8 @@ class boolean : public schema
 	}
 
 public:
-	boolean(const json &schema)
-	    : true_(schema) {}
+	boolean(const json &sch, root_schema *root)
+	    : schema(root), true_(sch) {}
 };
 
 class required : public schema
@@ -446,8 +497,8 @@ class required : public schema
 	}
 
 public:
-	required(const std::vector<std::string> &r)
-	    : required_(r) {}
+	required(const std::vector<std::string> &r, root_schema *root)
+	    : schema(root), required_(r) {}
 };
 
 class object : public schema
@@ -510,62 +561,63 @@ class object : public schema
 	}
 
 public:
-	object(const json &schema)
+	object(const json &sch, root_schema *root)
+	    : schema(root)
 	{
-		auto attr = schema.find("maxProperties");
-		if (attr != schema.end())
+		auto attr = sch.find("maxProperties");
+		if (attr != sch.end())
 			maxProperties_ = {true, attr.value()};
 
-		attr = schema.find("minProperties");
-		if (attr != schema.end())
+		attr = sch.find("minProperties");
+		if (attr != sch.end())
 			minProperties_ = {true, attr.value()};
 
-		attr = schema.find("required");
-		if (attr != schema.end())
+		attr = sch.find("required");
+		if (attr != sch.end())
 			required_ = attr.value().get<std::vector<std::string>>();
 
-		attr = schema.find("properties");
-		if (attr != schema.end()) {
+		attr = sch.find("properties");
+		if (attr != sch.end()) {
 			for (auto prop : attr.value().items())
 				properties_.insert(
 				    std::make_pair(
 				        prop.key(),
-				        schema::make(prop.value())));
+				        schema::make(prop.value(),root)));
 		}
 
 #ifndef NO_STD_REGEX
-		attr = schema.find("patternProperties");
-		if (attr != schema.end()) {
+		attr = sch.find("patternProperties");
+		if (attr != sch.end()) {
 			for (auto prop : attr.value().items())
 				patternProperties_.push_back(
 				    std::make_pair(
 				        REGEX_NAMESPACE::regex(prop.key(), REGEX_NAMESPACE::regex::ECMAScript),
-				        schema::make(prop.value())));
+				        schema::make(prop.value(),root)));
 		}
 #endif
 
-		attr = schema.find("additionalProperties");
-		if (attr != schema.end())
-			additionalProperties_ = schema::make(attr.value());
+		attr = sch.find("additionalProperties");
+		if (attr != sch.end())
+			additionalProperties_ = schema::make(attr.value(), root);
 
-		attr = schema.find("dependencies");
-		if (attr != schema.end())
+		attr = sch.find("dependencies");
+		if (attr != sch.end())
 			for (auto &dep : attr.value().items())
 				switch (dep.value().type()) {
 				case json::value_t::array:
 					dependencies_.emplace(dep.key(),
-					                      std::make_shared<required>(dep.value().get<std::vector<std::string>>()));
+					                      std::make_shared<required>(dep.value().get<std::vector<std::string>>(), root));
 					break;
 
 				default:
 					dependencies_.emplace(dep.key(),
-					                      schema::make(dep.value()));
+					                      schema::make(dep.value(), root));
 					break;
 				}
 
-		attr = schema.find("propertyNames");
-		if (attr != schema.end())
-			propertyNames_ = schema::make(attr.value());
+		attr = sch.find("propertyNames");
+		if (attr != sch.end())
+			propertyNames_ = schema::make(attr.value(), root);
 	}
 };
 
@@ -635,60 +687,60 @@ class array : public schema
 	}
 
 public:
-	array(const json &schema)
+	array(const json &sch, root_schema *root) : schema(root)
 	{
-		auto attr = schema.find("maxItems");
-		if (attr != schema.end())
+		auto attr = sch.find("maxItems");
+		if (attr != sch.end())
 			maxItems_ = {true, attr.value()};
 
-		attr = schema.find("minItems");
-		if (attr != schema.end())
+		attr = sch.find("minItems");
+		if (attr != sch.end())
 			minItems_ = {true, attr.value()};
 
-		attr = schema.find("uniqueItems");
-		if (attr != schema.end())
+		attr = sch.find("uniqueItems");
+		if (attr != sch.end())
 			uniqueItems_ = attr.value();
 
-		attr = schema.find("items");
-		if (attr != schema.end()) {
+		attr = sch.find("items");
+		if (attr != sch.end()) {
 			if (attr.value().type() == json::value_t::array) {
-				for (auto &subschema : attr.value())
-					items_.push_back(schema::make(subschema));
+				for (auto &subsch : attr.value())
+					items_.push_back(schema::make(subsch, root));
 
-				attr = schema.find("additionalItems");
-				if (attr != schema.end())
-					additionalItems_ = schema::make(attr.value());
+				attr = sch.find("additionalItems");
+				if (attr != sch.end())
+					additionalItems_ = schema::make(attr.value(), root);
 
 			} else if (attr.value().type() == json::value_t::object ||
 			           attr.value().type() == json::value_t::boolean)
-				items_schema_ = schema::make(attr.value());
+				items_schema_ = schema::make(attr.value(), root);
 		}
 
-		attr = schema.find("contains");
-		if (attr != schema.end())
-			contains_ = schema::make(attr.value());
+		attr = sch.find("contains");
+		if (attr != sch.end())
+			contains_ = schema::make(attr.value(), root);
 	}
 };
 
-std::shared_ptr<schema> type_schema::make(const json &schema, json::value_t type)
+std::shared_ptr<schema> type_schema::make(const json &schema, json::value_t type, root_schema *root)
 {
 	switch (type) {
 	case json::value_t::null:
-		return std::make_shared<null>(schema);
+		return std::make_shared<null>(schema, root);
 	case json::value_t::number_unsigned:
-		return std::make_shared<numeric<json::number_unsigned_t>>(schema);
+		return std::make_shared<numeric<json::number_unsigned_t>>(schema, root);
 	case json::value_t::number_integer:
-		return std::make_shared<numeric<json::number_integer_t>>(schema);
+		return std::make_shared<numeric<json::number_integer_t>>(schema, root);
 	case json::value_t::number_float:
-		return std::make_shared<numeric<json::number_float_t>>(schema);
+		return std::make_shared<numeric<json::number_float_t>>(schema,root);
 	case json::value_t::string:
-		return std::make_shared<string>(schema);
+		return std::make_shared<string>(schema,root);
 	case json::value_t::boolean:
-		return std::make_shared<boolean_type>(schema);
+		return std::make_shared<boolean_type>(schema,root);
 	case json::value_t::object:
-		return std::make_shared<object>(schema);
+		return std::make_shared<object>(schema,root);
 	case json::value_t::array:
-		return std::make_shared<array>(schema);
+		return std::make_shared<array>(schema,root);
 
 	case json::value_t::discarded: // not a real type - silence please
 		break;
@@ -696,23 +748,52 @@ std::shared_ptr<schema> type_schema::make(const json &schema, json::value_t type
 	return nullptr;
 }
 
-std::shared_ptr<schema> schema::make(const json &schema)
+class schema_ref : public schema
+{
+	const std::string ref_;
+
+	void validate(const json &instance, error_handler &e) const final
+	{
+		e.error("", instance, "unresovled schema-reference " + ref_);
+	}
+
+public:
+	schema_ref(const std::string &r, root_schema *root)
+	    : schema(root), ref_(r)
+	{
+		std::cerr << "ref: " << r << "\n";
+	}
+};
+
+
+std::shared_ptr<schema> schema::make(const json &schema, root_schema *root)
 {
 	// boolean schema
 	if (schema.type() == json::value_t::boolean)
-		return std::make_shared<boolean>(schema);
-	else
-		return std::make_shared<type_schema>(schema);
+		return std::make_shared<boolean>(schema, root);
+	else {
+		auto attr = schema.find("$ref");
+		if (attr != schema.end()) {
+			return std::make_shared<schema_ref>(attr.value().get<std::string>(), root);
+
+		} else
+			return std::make_shared<type_schema>(schema, root);
+	}
 }
 
-class root_schema : schema
+class root_schema : public schema
 {
 	std::shared_ptr<schema> root_;
 
+	std::vector<std::shared_ptr<schema_ref>> unresovled_refs_;
+
 public:
+	root_schema()
+	    : schema(this) {}
+
 	void set_root_schema(const json &schema)
 	{
-		root_ = schema::make(schema);
+		root_ = schema::make(schema, this);
 	}
 
 	void validate(const json &instance, error_handler &e) const final
@@ -724,61 +805,7 @@ public:
 	}
 };
 
-#if 0
-validator *createValidator(const json &schema)
-{
-	// first check whether the schema is true or false
-	if (schema.type() == json::value_t::boolean) {
-		if (schema == true)
-			return new always_true_validator;
-		else
-			return new always_false_validator;
-	}
-
-	// assume schema is an object
-	json type;
-
-	const auto type_iter = schema.find("type");
-	if (type_iter == schema.end())
-		type = "number";
-	else
-		type = type_iter.value();
-
-	std::cerr << "type : " << type << "\n";
-
-	switch (type.type()) {
-	case json::value_t::array:
-		// TODO handle array of strings
-		break;
-
-	case json::value_t::string:
-		if (type == "string")
-			return new string_validator(schema);
-		else if (type == "null")
-			return new null_validator(schema);
-		else if (type == "boolean")
-			return new boolean_validator(schema);
-		else if (type == "object")
-			return new object_validator(schema);
-		else if (type == "array")
-			return new array_validator(schema);
-		else if (type == "number")
-			return new numeric_validator<json::number_float_t>(schema);
-		else if (type == "integer")
-			return new numeric_validator<json::number_integer_t>(schema);
-
-	default:
-		// type field must be either an array or a string
-		break;
-	}
-
-	return nullptr;
-}
-#endif
-
 } // namespace validator
-
-//template<ErrorHandlingPolicy, Default
 
 int main(void)
 {
